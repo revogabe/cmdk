@@ -1,14 +1,15 @@
 import * as RadixDialog from '@radix-ui/react-dialog'
 import * as React from 'react'
-import commandScore from 'command-score'
+import { commandScore } from './command-score'
 
 type Children = { children?: React.ReactNode }
 type DivProps = React.HTMLAttributes<HTMLDivElement>
 
-type LoadingProps = Children & {
-  /** Estimated progress of loading asynchronous options. */
-  progress?: number
-}
+type LoadingProps = Children &
+  DivProps & {
+    /** Estimated progress of loading asynchronous options. */
+    progress?: number
+  }
 type EmptyProps = Children & DivProps & {}
 type SeparatorProps = DivProps & {
   /** Whether this separator should always be rendered. Useful if you disable automatic filtering. */
@@ -90,6 +91,10 @@ type CommandProps = Children &
      * Optionally set to `true` to turn on looping around when using the arrow keys.
      */
     loop?: boolean
+    /**
+     * Set to `false` to disable ctrl+n/j/p/k shortcuts. Defaults to `true`.
+     */
+    vimBindings?: boolean
   }
 
 type Context = {
@@ -115,6 +120,10 @@ type Store = {
   setState: <K extends keyof State>(key: K, value: State[K], opts?: any) => void
   emit: () => void
 }
+type Group = {
+  id: string
+  forceMount?: boolean
+}
 
 const LIST_SELECTOR = `[cmdk-list-sizer=""]`
 const GROUP_SELECTOR = `[cmdk-group=""]`
@@ -133,7 +142,7 @@ const useCommand = () => React.useContext(CommandContext)
 const StoreContext = React.createContext<Store>(undefined)
 const useStore = () => React.useContext(StoreContext)
 // @ts-ignore
-const GroupContext = React.createContext<string>(undefined)
+const GroupContext = React.createContext<Group>(undefined)
 
 const Command = React.forwardRef<HTMLDivElement, CommandProps>((props, forwardedRef) => {
   const ref = React.useRef<HTMLDivElement>(null)
@@ -156,7 +165,7 @@ const Command = React.forwardRef<HTMLDivElement, CommandProps>((props, forwarded
   const ids = useLazyRef<Map<string, string>>(() => new Map()) // id → value
   const listeners = useLazyRef<Set<() => void>>(() => new Set()) // [...rerenders]
   const propsRef = useAsRef(props)
-  const { label, children, value, onValueChange, filter, shouldFilter, ...etc } = props
+  const { label, children, value, onValueChange, filter, shouldFilter, vimBindings = true, ...etc } = props
 
   const listId = React.useId()
   const labelId = React.useId()
@@ -515,7 +524,7 @@ const Command = React.forwardRef<HTMLDivElement, CommandProps>((props, forwarded
             case 'n':
             case 'j': {
               // vim keybind down
-              if (e.ctrlKey) {
+              if (vimBindings && e.ctrlKey) {
                 next(e)
               }
               break
@@ -527,7 +536,7 @@ const Command = React.forwardRef<HTMLDivElement, CommandProps>((props, forwarded
             case 'p':
             case 'k': {
               // vim keybind up
-              if (e.ctrlKey) {
+              if (vimBindings && e.ctrlKey) {
                 prev(e)
               }
               break
@@ -549,12 +558,16 @@ const Command = React.forwardRef<HTMLDivElement, CommandProps>((props, forwarded
               break
             }
             case 'Enter': {
-              // Trigger item onSelect
-              e.preventDefault()
-              const item = getSelectedItem()
-              if (item) {
-                const event = new Event(SELECT_EVENT)
-                item.dispatchEvent(event)
+              // Check if IME composition is finished before triggering onSelect
+              // This prevents unwanted triggering while user is still inputting text with IME
+              if (!e.nativeEvent.isComposing) {
+                // Trigger item onSelect
+                e.preventDefault()
+                const item = getSelectedItem()
+                if (item) {
+                  const event = new Event(SELECT_EVENT)
+                  item.dispatchEvent(event)
+                }
               }
             }
           }
@@ -585,12 +598,13 @@ const Command = React.forwardRef<HTMLDivElement, CommandProps>((props, forwarded
 const Item = React.forwardRef<HTMLDivElement, ItemProps>((props, forwardedRef) => {
   const id = React.useId()
   const ref = React.useRef<HTMLDivElement>(null)
-  const groupId = React.useContext(GroupContext)
+  const groupContext = React.useContext(GroupContext)
   const context = useCommand()
   const propsRef = useAsRef(props)
+  const forceMount = propsRef.current?.forceMount ?? groupContext?.forceMount
 
   useLayoutEffect(() => {
-    return context.item(id, groupId)
+    return context.item(id, groupContext?.id)
   }, [])
 
   const value = useValue(id, ref, [props.value, props.children, ref])
@@ -598,13 +612,7 @@ const Item = React.forwardRef<HTMLDivElement, ItemProps>((props, forwardedRef) =
   const store = useStore()
   const selected = useCmdk((state) => state.value && state.value === value.current)
   const render = useCmdk((state) =>
-    props.forceMount
-      ? true
-      : context.filter() === false
-      ? true
-      : !state.search
-      ? true
-      : state.filtered.items.get(id) > 0,
+    forceMount ? true : context.filter() === false ? true : !state.search ? true : state.filtered.items.get(id) > 0,
   )
 
   React.useEffect(() => {
@@ -651,14 +659,14 @@ const Item = React.forwardRef<HTMLDivElement, ItemProps>((props, forwardedRef) =
  * Grouped items are always shown together.
  */
 const Group = React.forwardRef<HTMLDivElement, GroupProps>((props, forwardedRef) => {
-  const { heading, children, ...etc } = props
+  const { heading, children, forceMount, ...etc } = props
   const id = React.useId()
   const ref = React.useRef<HTMLDivElement>(null)
   const headingRef = React.useRef<HTMLDivElement>(null)
   const headingId = React.useId()
   const context = useCommand()
   const render = useCmdk((state) =>
-    props.forceMount ? true : context.filter() === false ? true : !state.search ? true : state.filtered.groups.has(id),
+    forceMount ? true : context.filter() === false ? true : !state.search ? true : state.filtered.groups.has(id),
   )
 
   useLayoutEffect(() => {
@@ -667,7 +675,8 @@ const Group = React.forwardRef<HTMLDivElement, GroupProps>((props, forwardedRef)
 
   useValue(id, ref, [props.value, props.heading, headingRef])
 
-  const inner = <GroupContext.Provider value={id}>{children}</GroupContext.Provider>
+  const contextValue = React.useMemo(() => ({ id, forceMount }), [forceMount])
+  const inner = <GroupContext.Provider value={contextValue}>{children}</GroupContext.Provider>
 
   return (
     <div
@@ -962,8 +971,11 @@ function useValue(
           return part.trim().toLowerCase()
         }
 
-        if (typeof part === 'object' && 'current' in part && part.current) {
-          return part.current.textContent?.trim().toLowerCase()
+        if (typeof part === 'object' && 'current' in part) {
+          if (part.current) {
+            return part.current.textContent?.trim().toLowerCase()
+          }
+          return valueRef.current
         }
       }
     })()
